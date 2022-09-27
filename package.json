@@ -1,0 +1,55 @@
+{
+	"publisher": "ComplYue",
+	"license": "MIT",
+	"repository": {
+		"url": "https://github.com/complyue/gdj-vscode-formatter"
+	},
+	"name": "gdj-vscode-formatter",
+	"displayName": "GoDuck.jl Code Formatter",
+	"description": "Code Formatter for GoDuck.jl",
+	"version": "1.0.0",
+	"engines": {
+		"vscode": "^1.20.0"
+	},
+	"categories": [
+		"Programming Languages",
+		"Formatters"
+	],
+	"activationEvents": [
+		"onLanguage:gdj"
+	],
+	"main": "./out/extension.js",
+	"contributes": {
+		"configurationDefaults": {
+			"[gdj]": {
+				"editor.formatOnSave": true,
+				"editor.rulers": [
+					80,
+					100,
+					120
+				],
+				"editor.wordWrap": "bounded",
+				"editor.wordWrapColumn": 100
+			}
+		}
+	},
+	"scripts": {
+		"vscode:prepublish": "yarn run compile",
+		"compile": "tsc -p ./",
+		"lint": "eslint src --ext ts",
+		"watch": "tsc -watch -p ./",
+		"pretest": "yarn run compile && yarn run lint"
+	},
+	"devDependencies": {
+		"@types/glob": "^7.1.1",
+		"@types/mocha": "^7.0.2",
+		"@types/node": "^12.12.0",
+		"@types/vscode": "^1.20.0",
+		"@typescript-eslint/eslint-plugin": "^3.7.0",
+		"@typescript-eslint/parser": "^3.7.0",
+		"eslint": "^7.5.0",
+		"glob": "^7.1.6",
+		"mocha": "^7.1.2",
+		"typescript": "^4.5.0"
+	}
+}

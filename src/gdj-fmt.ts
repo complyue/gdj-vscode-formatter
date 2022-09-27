@@ -1,0 +1,422 @@
+
+import { TextDocument, Range, TextEdit, ProviderResult } from 'vscode'
+
+
+/**
+ * align with GoDuck lexer
+
+function is_name_start_char(c::Char)::Bool
+  c in ('_',) || Base.Unicode.isletter(c)
+end
+
+function is_name_part_char(c::Char)::Bool
+  # (!) allowed following Julia
+  c in ('_', '!') || Base.Unicode.isletter(c) || Base.Unicode.isnumeric(c)
+end
+
+ */
+const identStartChars = /(_|\p{L})/u
+const identChars = /([_!]|\p{L}|\p{N})/u
+
+
+/**
+ * align with GoDuck lexer
+
+function is_operator_char(c::Char)::Bool
+  if codepoint(c) < 128
+    c in (',', ';', '.', '=',
+      '!', '@', '#', '$', '%', '^',
+      '&', '|', ':', '<', '>', '?',
+      '+', '-', '*', '/')
+  else
+    Base.Unicode.category_code(c) in (
+      Base.Unicode.UTF8PROC_CATEGORY_SM, # Symbol math
+      Base.Unicode.UTF8PROC_CATEGORY_SC, # Symbol currency
+      Base.Unicode.UTF8PROC_CATEGORY_SK, # Symbol modifier
+      Base.Unicode.UTF8PROC_CATEGORY_SO, # Symbol other
+      Base.Unicode.UTF8PROC_CATEGORY_PD, # Punctuation dash
+      Base.Unicode.UTF8PROC_CATEGORY_PO, # Punctuation other
+    )
+  end
+end
+
+ */
+function isOperatorChar(c: string): boolean {
+  if (c <= '\xff') {
+    return ",;.=!@#$%^&|:<>?+-*/".indexOf(c) >= 0
+  } else {
+    return /(\p{Sm}|\p{Sc}|\p{Sk}|\p{So}|\p{Pd}|\p{Po})/u.test(c)
+  }
+}
+
+
+function shouldDedentCurr(line: string): boolean {
+  for (const c of line) {
+    if ('}])'.indexOf(c) >= 0) {
+      // closing bracket (though possibly augmented) leading, should dedent
+      return true
+    }
+    if (isOperatorChar(c)) {
+      // possibly part of augmented closing bracket, check following to see
+      continue
+    }
+    // some code leading, should not dedent
+    return false
+  }
+  return true
+}
+
+
+export function formatGoDuckLines(
+  document: TextDocument, range: Range,
+): ProviderResult<TextEdit[]> {
+  const sinceLine = range.start.line
+  const beforeLine = Math.min(document.lineCount, range.end.line + 1)
+
+  let fmtResult = ''
+  let currCtx: GoDuckSrcContext = { scope: GoDuckSrcScope.Code }
+  let bracketStack: string[] = []
+  let currIndent = '', nextIndent = ''
+  let blankLineCnt = 0 // number of adjacent blank lines 
+
+  for (let lineIdx = 0; lineIdx < beforeLine; lineIdx++, currIndent = nextIndent) {
+    let line = document.lineAt(lineIdx).text
+
+    let lineResult = ''
+    let lexemeOnline = false
+
+    function appendLexeme(lexemeHead: string): void {
+      if (lexemeOnline) { // after some lexeme, insert a space
+        lineResult += ' '
+      }
+      lineResult += lexemeHead
+      lexemeOnline = true
+    }
+
+    const [lineIndent, lineSrc] = (() => {
+      if (GoDuckSrcScope.String === currCtx.scope) {
+        const [strRest, afterStr] = finishStrLit(line, currCtx.delimiter)
+        if (null === afterStr) { // string not finished in this line
+          if (lineIdx >= sinceLine) {
+            fmtResult += line.trimRight() + '\n'
+          }
+          return [null, null];
+        }
+        // string finished in this line
+        currIndent = ''
+        lineResult = strRest
+
+        // partial string in this line is considered a lexeme
+        lexemeOnline = true
+
+        // trnasfer to code
+        currCtx = { scope: GoDuckSrcScope.Code }
+        return ['', afterStr]
+      } else {
+        const [, lineIndent, lineSrc,] = <string[]> // it's guaranteed to match
+          /^(\s*)(.*)$/[Symbol.match](line)
+        return [lineIndent, lineSrc];
+      }
+    })();
+    if (null === lineIndent) {
+      continue; // line already consumed
+    }
+
+    if (!lineSrc) {
+      if (lineResult) { // a fully consumed, non-blank line
+        if (lineIdx >= sinceLine) {
+          fmtResult += currIndent + lineResult.trimRight() + '\n'
+        }
+      } else { // a blank line
+        if (lineIdx < sinceLine) { // not to be changed
+          blankLineCnt++
+        } else {
+          if (blankLineCnt < 2) { // not too many of blank lines
+            fmtResult += '\n' // one more blank line
+            blankLineCnt++
+          }
+        }
+      }
+      continue
+    }
+
+    // not a blank line
+    blankLineCnt = 0
+    if (lineIdx < sinceLine) { // accept what can't be changed
+      nextIndent = lineIndent
+    }
+
+    function popBracket(openTag: string) {
+      const t = bracketStack.pop()
+      if (undefined === t) {
+        // extranous closing bracket, ignore
+      } else if (t !== openTag) {
+        // unmatched closing bracket, ignore
+        bracketStack.push(t)
+      } else {
+        // decrease 1 level (2 spaces) of indent
+        nextIndent = nextIndent.substring(2)
+        // dedent since current line as necessary
+        if (shouldDedentCurr(lineResult)) {
+          // on bracket closing, should only dedent,
+          // if next line has even more indent scheduled,
+          // don't follow that
+          if (currIndent.length > nextIndent.length) {
+            currIndent = nextIndent
+          }
+        }
+      }
+    }
+
+    let restSrc = lineSrc.trimLeft()
+    let spcLeading = restSrc.length < lineSrc.length
+    while (restSrc) {
+
+      if (GoDuckSrcScope.Comment === currCtx.scope) {
+        const cmtCloseIdx = restSrc.indexOf('=#')
+        if (cmtCloseIdx < 0) { // still in comment block
+          // keep however this line is indented
+          currIndent = ''
+          lineResult = line
+          restSrc = '' // done with this line
+        } else { // block comment finished in this line
+          const cmtContent = restSrc.substring(0, cmtCloseIdx + 2).trimLeft()
+          lineResult += cmtContent
+          lexemeOnline = true
+          const afterCmt = restSrc.substring(cmtCloseIdx + 2)
+          restSrc = afterCmt.trimLeft()
+          spcLeading = restSrc.length < afterCmt.length
+          // trnasfer to code
+          currCtx = { scope: GoDuckSrcScope.Code }
+        }
+        continue
+      }
+
+      const [, cmtTag, cmtRest] = <string[]>
+        /^(#=|#)?(.*)$/[Symbol.match](restSrc)
+      switch (cmtTag) {
+        case '#': // line comment
+          if (lexemeOnline) {
+            lineResult += ' '
+          }
+          lineResult += restSrc.trimRight()
+          restSrc = '' // done with this line
+          break
+        case '#=': // start of block comment
+          const singleLine = /^(.*)(=#)(.*)$/[Symbol.match](cmtRest)
+          if (singleLine) { // block comment finished in this line
+            const [, cmtContent, _, afterCmt] = <string[]>singleLine
+            appendLexeme('#=' + cmtContent + '=#')
+            restSrc = afterCmt.trimLeft()
+            spcLeading = restSrc.length < afterCmt.length
+          } else { // block comment not finished in this line
+            appendLexeme(restSrc.trimRight())
+            restSrc = '' // done with this line
+            // transfer to block comment
+            currCtx = { scope: GoDuckSrcScope.Comment, block: true }
+          }
+          break
+        default: // not starting comment
+          const [, strDelim, strMore] = <string[]>
+            /^("""|'''|```|"|'|`)?(.*)$/[Symbol.match](restSrc)
+          if (strDelim) { // start of string literal
+            const [strRest, afterStr] = finishStrLit(strMore, strDelim)
+            if (null !== afterStr) { // string finished in this line 
+              // insert space before the string, iif it originally
+              if (spcLeading) {  // has original leading space
+                lineResult += ' '
+              } else if (lineResult.length > 0) {
+                if (',;)]}'.indexOf(lineResult[lineResult.length - 1]) >= 0) {
+                  // no original space, but following comma, semicolon,
+                  // closing bracket. insert a single space
+                  lineResult += ' '
+                }
+              }
+              lineResult += strDelim + strRest
+
+              // string in this line is considered a lexeme
+              lexemeOnline = true
+
+              const moreAfter = afterStr.trimLeft()
+              restSrc = moreAfter
+              spcLeading = moreAfter.length < afterStr.length
+            } else { // string not finished in this line
+              // insert space before the string, iif it originally
+              if (spcLeading) { lineResult += ' ' } // has leading space
+              lineResult += restSrc.trimRight()
+
+              restSrc = '' // done with this line
+              // transfer to multi-line string
+              currCtx = { scope: GoDuckSrcScope.String, delimiter: strDelim }
+            }
+          } else { // not starting string
+            // extract next contiguous non-space sequence
+            const [, seq, moreSrc,] = <string[]>
+              /^(\S+)(.*)$/[Symbol.match](restSrc)
+            if (lexemeOnline && spcLeading) {
+              // collapse leading spaces into a single space
+              lineResult += ' '
+            }
+            lexemeOnline = true
+            let cutOffIdx = seq.length
+            let inIdent = false
+            for (let i = 0; i < cutOffIdx; i++) {
+              const c = seq[i]
+              if (inIdent) {
+                if (!identChars.test(c)) {
+                  inIdent = false
+                }
+              } else if (identStartChars.test(c)) {
+                inIdent = true
+              }
+              switch (c) {
+                // start of string
+                case "'":
+                  if (inIdent) {
+                    // special treatment for the single quote possibly appears 
+                    // within an identifier - it's part of the identifier, not
+                    // a string start
+                    lineResult += c
+                    break
+                  }
+                case '"':
+                case '`':
+                  cutOffIdx = i
+                  break
+                // start of new expr/stmt, break the sequence, so as to 
+                // insert a following space
+                case ',':
+                case ';':
+                  lineResult = lineResult.trimRight() + c
+                  cutOffIdx = i + 1
+                  break
+                case '{':
+                  if (i + 1 < cutOffIdx) {
+                    const nc = seq[i + 1]
+                    if (nc === '#') { // start of block comment
+                      const cmtRest = seq.substr(i + 2) + moreSrc
+                      const singleLine = /^(.*)(=#)(.*)$/[Symbol.match](cmtRest)
+                      if (singleLine) { // block comment finished in this line
+                        const [, cmtContent, _, afterCmt] = <string[]>singleLine
+                        appendLexeme('#=' + cmtContent + '=#')
+                        // mark that more have been consumed
+                        i = cutOffIdx = seq.length + 1
+                        restSrc = afterCmt.trimLeft()
+                        spcLeading = restSrc.length < afterCmt.length
+                      } else { // block comment not finished in this line
+                        const cmtStart = seq.substr(i) + moreSrc
+                        appendLexeme(cmtStart.trimRight())
+                        // mark that more have been consumed
+                        i = cutOffIdx = seq.length + 1
+                        restSrc = '' // done with this whole line
+                        // transfer to block comment
+                        currCtx = { scope: GoDuckSrcScope.Comment, block: true }
+                      }
+                      break
+                    }
+                  }
+                  bracketStack.push(c)
+                  nextIndent += '  ' // increase 1 level (2 spaces) of indent
+                  lineResult += c
+                  for (i++; i < cutOffIdx; i++) {
+                    const c1 = seq[i]
+                    if (!isOperatorChar(c1)) { break }
+                    lineResult += c1
+                  }
+                  cutOffIdx = i // start new expr/stmt
+                  break
+                case '[':
+                  bracketStack.push(c)
+                  nextIndent += '  ' // increase 1 level (2 spaces) of indent
+                  lineResult += c
+                  cutOffIdx = i + 1 // start new expr/stmt
+                  break
+                case '(':
+                  bracketStack.push(c)
+                  nextIndent += '  ' // increase 1 level (2 spaces) of indent
+                  lineResult += c
+                  cutOffIdx = i + 1 // start new expr/stmt
+                  break
+                case '}':
+                  popBracket('{')
+                  lineResult += c
+                  cutOffIdx = i + 1 // start new expr/stmt
+                  break
+                case ']':
+                  popBracket('[')
+                  lineResult += c
+                  cutOffIdx = i + 1 // start new expr/stmt
+                  break
+                case ')':
+                  popBracket('(')
+                  lineResult += c
+                  cutOffIdx = i + 1 // start new expr/stmt
+                  break
+                default:
+                  lineResult += c
+              }
+            }
+            if (cutOffIdx > seq.length) {
+              // restSrc and spcLeading should have been set properly
+            } else {
+              const moreAfter = cutOffIdx < seq.length
+                ? seq.substr(cutOffIdx) + moreSrc
+                : moreSrc;
+              restSrc = moreAfter.trimLeft()
+              spcLeading = restSrc.length < moreAfter.length
+            }
+          }
+      }
+
+    }
+
+    if (lineIdx >= sinceLine) {
+      fmtResult += currIndent + lineResult.trimRight() + '\n'
+    }
+  }
+
+  if (beforeLine >= document.lineCount) { // formatted to end-of-file
+    // exactly 1 blank line at eof
+    fmtResult = fmtResult.trimRight() + '\n'
+  } else { // not formatted to end-of-file
+    if (fmtResult.endsWith('\n\n\n')) { // no more than 2 blank lines at last
+      fmtResult = fmtResult.trimRight() + '\n\n\n'
+    }
+  }
+  return [TextEdit.replace(new Range(sinceLine, 0, beforeLine, 0), fmtResult)]
+}
+
+
+enum GoDuckSrcScope {
+  Code, Comment, String,
+}
+
+type GoDuckSrcContext = {
+  scope: GoDuckSrcScope.Code
+} | {
+  scope: GoDuckSrcScope.Comment
+  block: boolean
+} | {
+  scope: GoDuckSrcScope.String
+  delimiter: string
+}
+
+
+function finishStrLit(strMore: string, strDelim: string): [string, string | null] {
+  let startIdx = 0
+  while (true) {
+    const endIdx = strMore.indexOf(strDelim, startIdx)
+    if (endIdx < 0) {
+      return [strMore, null]
+    }
+    if (endIdx > 0 && '\\' === strMore[endIdx - 1]) {
+      // escaped, not realy end of string, continue search
+      startIdx = endIdx + 1
+    }
+    const strClosePos = endIdx + strDelim.length
+    return [
+      strMore.substring(0, strClosePos),
+      strMore.substring(strClosePos)
+    ]
+  }
+}
