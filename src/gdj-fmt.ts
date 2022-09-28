@@ -24,10 +24,12 @@ const identChars = /([_!]|\p{L}|\p{N})/u
 
 function is_operator_char(c::Char)::Bool
   if codepoint(c) < 128
-    c in (',', ';', '.', '=',
+    c in (
+      ',', ';', '.', '=',
       '!', '@', '#', '$', '%', '^',
       '&', '|', ':', '<', '>', '?',
-      '+', '-', '*', '/')
+      '+', '-', '*', '/',
+    )
   else
     Base.Unicode.category_code(c) in (
       Base.Unicode.UTF8PROC_CATEGORY_SM, # Symbol math
@@ -273,9 +275,11 @@ export function formatGoDuckLines(
                 // start of string
                 case "'":
                   if (inIdent) {
-                    // special treatment for the single quote possibly appears 
-                    // within an identifier - it's part of the identifier, not
-                    // a string start
+                    // special treatment for the single quote immediately following an identifier:
+                    // Julia takes it as the `adjoint` suffix operation, and GoDuck.jl just allows
+                    // arbitrary suffix ops started with a single quote.
+                    // here we kinda leave it as part of the identifier - not fully right but seems
+                    // acceptable per a formatter as the role we assume.
                     lineResult += c
                     break
                   }
